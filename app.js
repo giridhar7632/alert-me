@@ -117,7 +117,6 @@ async function checkBookingStatus() {
 			// Wait for the card container to appear
 			await page.waitForSelector('.bg-white.rounded-2xl', { timeout: 30000 })
 
-			// FIXED: Replaced page.waitForTimeout with manual delay
 			await delay(2000)
 
 			// Find the card and check the button text
@@ -130,10 +129,7 @@ async function checkBookingStatus() {
 				for (const card of cards) {
 					const heading = card.querySelector('h3')
 					// Check specifically for card
-					if (
-						heading &&
-						heading.textContent.trim().includes(CONFIG.targetCheck)
-					) {
+					if (heading && heading.textContent.trim().includes('Bhasmaarti')) {
 						const button = card.querySelector('button')
 						const link = card.querySelector('a')
 
