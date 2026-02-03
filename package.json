@@ -1,0 +1,20 @@
+{
+  "name": "booking-monitor",
+  "version": "1.0.0",
+  "description": "Automated monitor for booking availability",
+  "main": "app.js",
+  "scripts": {
+    "start": "node app.js"
+  },
+  "keywords": [
+    "booking-monitor",
+    "automation"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "dotenv": "^17.2.3",
+    "nodemailer": "^7.0.13",
+    "puppeteer": "^24.36.1"
+  }
+}
