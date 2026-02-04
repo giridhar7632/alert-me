@@ -3,7 +3,7 @@ const nodemailer = require('nodemailer')
 require('dotenv').config()
 
 // ========================================
-// CONFIGURATION - UPDATE THESE VALUES
+// CONFIGURATION
 // ========================================
 const CONFIG = {
 	email: {
@@ -15,12 +15,8 @@ const CONFIG = {
 	emailSubject: process.env.EMAIL_SUBJECT,
 	emailBody: process.env.EMAIL_BODY,
 	targetCheck: process.env.TARGET_CHECK,
-
-	// Monitoring settings
-	checkInterval: 5 * 60 * 1000,
+	checkInterval: Number(process.env.CHECK_INTERVAL) * 60 * 1000,
 	targetUrl: process.env.WEBSITE_URL,
-
-	// Text to look for when bookings are open
 	bookingOpenText: 'Book Now',
 	bookingClosedText: 'Bookings Open Soon',
 }
@@ -37,10 +33,39 @@ const transporter = nodemailer.createTransport({
 })
 
 // ========================================
+// UTILITY FUNCTIONS
+// ========================================
+const delay = (time) => new Promise((resolve) => setTimeout(resolve, time))
+
+// Graceful cleanup handler
+let isShuttingDown = false
+async function gracefulShutdown(browser, intervalId) {
+	if (isShuttingDown) return
+	isShuttingDown = true
+
+	console.log('\n🛑 Shutting down gracefully...')
+
+	if (intervalId) {
+		clearInterval(intervalId)
+		console.log('✅ Interval cleared')
+	}
+
+	if (browser && browser.process()) {
+		await browser
+			.close()
+			.catch((err) => console.error('Error closing browser:', err))
+		console.log('✅ Browser closed')
+	}
+
+	console.log('👋 Goodbye!')
+	process.exit(0)
+}
+
+// ========================================
 // SEND EMAIL NOTIFICATION
 // ========================================
 async function sendEmailNotification(buttonText, timestamp) {
-	emailBody = emailBody
+	let emailBody = CONFIG.emailBody
 		.replace(/\{\{BUTTON_TEXT\}\}/g, buttonText)
 		.replace(/\{\{TIMESTAMP\}\}/g, timestamp)
 		.replace(/\{\{URL\}\}/g, CONFIG.targetUrl)
@@ -49,24 +74,25 @@ async function sendEmailNotification(buttonText, timestamp) {
 		from: CONFIG.email.user,
 		to: CONFIG.email.to,
 		subject: CONFIG.emailSubject,
-		html: CONFIG.emailBody,
+		html: emailBody,
 	}
 
 	try {
 		await transporter.sendMail(mailOptions)
 		console.log('✅ Email notification sent successfully!')
+		return true
 	} catch (error) {
 		console.error('❌ Error sending email:', error.message)
+		return false
 	}
 }
 
 // ========================================
 // CHECK BOOKING STATUS
 // ========================================
-const delay = (time) => new Promise((resolve) => setTimeout(resolve, time))
-
 async function checkBookingStatus() {
-	let browser
+	let browser = null
+	let page = null
 	const maxRetries = 3
 	let retryCount = 0
 
@@ -74,39 +100,66 @@ async function checkBookingStatus() {
 		try {
 			if (retryCount > 0) {
 				console.log(`⚠️  Retry attempt ${retryCount}/${maxRetries}...`)
-				await delay(5000) // Wait 5 seconds before retry
+				await delay(5000)
 			}
 
 			console.log(
 				`\n[${new Date().toLocaleString()}] Checking booking status...`
 			)
 
+			// Launch browser with optimized settings
 			browser = await puppeteer.launch({
-				// 'headless: "new"' is deprecated in v22+. Use true.
-				headless: true,
+				headless: true, // Changed from 'headless: "new"'
 				args: [
 					'--no-sandbox',
 					'--disable-setuid-sandbox',
 					'--disable-dev-shm-usage',
 					'--disable-accelerated-2d-canvas',
 					'--disable-gpu',
+					'--disable-software-rasterizer',
+					'--disable-extensions',
+					'--disable-background-networking',
+					'--disable-default-apps',
+					'--disable-sync',
+					'--metrics-recording-only',
+					'--mute-audio',
+					'--no-first-run',
 					'--window-size=1920,1080',
+					// Fix D-Bus errors
+					'--disable-features=AudioServiceOutOfProcess',
+					'--disable-dbus',
 				],
+				// Limit resources
+				ignoreHTTPSErrors: true,
+				defaultViewport: { width: 1920, height: 1080 },
 			})
 
-			const page = await browser.newPage()
+			// Set up browser close handlers
+			browser.on('disconnected', () => {
+				console.log('⚠️  Browser disconnected')
+			})
+
+			page = await browser.newPage()
+
+			// Set resource limits
+			await page.setRequestInterception(true)
+			page.on('request', (request) => {
+				// Block unnecessary resources to save memory
+				const resourceType = request.resourceType()
+				if (['image', 'stylesheet', 'font', 'media'].includes(resourceType)) {
+					request.abort()
+				} else {
+					request.continue()
+				}
+			})
 
 			// Set a realistic user agent
 			await page.setUserAgent(
 				'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 			)
 
-			// Set viewport
-			await page.setViewport({ width: 1920, height: 1080 })
-
 			console.log('🌐 Loading website...')
 
-			// Increased timeout to 60s
 			await page.goto(CONFIG.targetUrl, {
 				waitUntil: 'domcontentloaded',
 				timeout: 60000,
@@ -114,28 +167,24 @@ async function checkBookingStatus() {
 
 			console.log('⏳ Waiting for content to load...')
 
-			// Wait for the card container to appear
+			// Wait for the card container
 			await page.waitForSelector('.bg-white.rounded-2xl', { timeout: 30000 })
-
 			await delay(2000)
 
-			// Find the card and check the button text
+			// Find the card and check button text
 			const buttonText = await page.evaluate(() => {
-				// Find all service cards
 				const cards = Array.from(
 					document.querySelectorAll('.bg-white.rounded-2xl')
 				)
 
 				for (const card of cards) {
 					const heading = card.querySelector('h3')
-					// Check specifically for card
 					if (heading && heading.textContent.trim().includes('Bhasmaarti')) {
 						const button = card.querySelector('button')
 						const link = card.querySelector('a')
-
-						// Return text from whichever element exists
-						if (button) return button.textContent.trim()
-						if (link) return link.textContent.trim()
+						return (
+							button?.textContent.trim() || link?.textContent.trim() || null
+						)
 					}
 				}
 				return null
@@ -144,7 +193,6 @@ async function checkBookingStatus() {
 			if (buttonText) {
 				console.log(`📋 Current button text: "${buttonText}"`)
 
-				// Case-insensitive check just to be safe
 				const lowerButtonText = buttonText.toLowerCase()
 				const lowerTargetText = CONFIG.bookingOpenText.toLowerCase()
 
@@ -159,7 +207,7 @@ async function checkBookingStatus() {
 				console.log('⚠️  Could not find button on the page.')
 			}
 
-			return false // Booking not open yet
+			return false
 		} catch (error) {
 			console.error(
 				`❌ Error during check (attempt ${retryCount + 1}/${maxRetries}):`,
@@ -170,6 +218,11 @@ async function checkBookingStatus() {
 				console.log(
 					'💡 Tip: Website might be loading slowly or blocking connection.'
 				)
+			} else if (error.message.includes('pthread_create')) {
+				console.log(
+					'💡 Tip: System resources exhausted. Waiting longer before retry...'
+				)
+				await delay(10000) // Wait 10 seconds for resource recovery
 			}
 
 			retryCount++
@@ -179,23 +232,50 @@ async function checkBookingStatus() {
 				return false
 			}
 		} finally {
-			if (browser) {
-				await browser.close()
+			// CRITICAL: Always close page and browser
+			try {
+				if (page) {
+					await page.close()
+					page = null
+				}
+			} catch (err) {
+				console.error('Error closing page:', err.message)
+			}
+
+			try {
+				if (browser) {
+					await browser.close()
+					browser = null
+				}
+			} catch (err) {
+				console.error('Error closing browser:', err.message)
+			}
+
+			// Force garbage collection if available
+			if (global.gc) {
+				global.gc()
 			}
 		}
 	}
+
 	return false
 }
+
 // ========================================
-// MAIN MONITORING LOOP
+// INTERNET CONNECTION TEST
 // ========================================
 async function checkInternetConnection() {
-	let browser
+	let browser = null
 	try {
 		console.log('🔍 Testing internet connection...')
 		browser = await puppeteer.launch({
-			headless: 'new',
-			args: ['--no-sandbox', '--disable-setuid-sandbox'],
+			headless: true,
+			args: [
+				'--no-sandbox',
+				'--disable-setuid-sandbox',
+				'--disable-dev-shm-usage',
+				'--disable-dbus',
+			],
 		})
 		const page = await browser.newPage()
 		await page.goto('https://www.google.com', { timeout: 10000 })
@@ -208,10 +288,14 @@ async function checkInternetConnection() {
 	} finally {
 		if (browser) {
 			await browser.close()
+			browser = null
 		}
 	}
 }
 
+// ========================================
+// MAIN MONITORING LOOP
+// ========================================
 async function startMonitoring() {
 	console.log('🚀 Booking Monitor Started')
 	console.log('='.repeat(60))
@@ -222,31 +306,45 @@ async function startMonitoring() {
 	console.log(`📧 Notification Email: ${CONFIG.email.to}`)
 	console.log('='.repeat(60))
 
-	// Initial check
+	// Initial internet check
 	const hasInternet = await checkInternetConnection()
 	if (!hasInternet) {
 		console.log('Please fix your internet connection and run the script again.')
 		return
 	}
 
+	// Initial booking check
 	const isOpen = await checkBookingStatus()
-
 	if (isOpen) {
 		console.log('\n✅ Booking is already open! Monitor will stop.')
 		console.log('Please book your slot at:', CONFIG.targetUrl)
 		return
 	}
 
-	// Set up interval for periodic checks
-	const intervalId = setInterval(async () => {
-		const isOpen = await checkBookingStatus()
+	// Set up periodic checks
+	let intervalId = setInterval(async () => {
+		try {
+			const isOpen = await checkBookingStatus()
 
-		if (isOpen) {
-			console.log('\n✅ Booking opened! Stopping monitor.')
-			console.log('Please book your slot at:', CONFIG.targetUrl)
-			clearInterval(intervalId)
+			if (isOpen) {
+				console.log('\n✅ Booking opened! Stopping monitor.')
+				console.log('Please book your slot at:', CONFIG.targetUrl)
+				clearInterval(intervalId)
+				process.exit(0)
+			}
+		} catch (error) {
+			console.error('❌ Error in monitoring loop:', error.message)
+			// Continue monitoring despite errors
 		}
 	}, CONFIG.checkInterval)
+
+	// Set up graceful shutdown handlers
+	process.on('SIGINT', () => gracefulShutdown(null, intervalId))
+	process.on('SIGTERM', () => gracefulShutdown(null, intervalId))
+	process.on('uncaughtException', (error) => {
+		console.error('❌ Uncaught Exception:', error)
+		gracefulShutdown(null, intervalId)
+	})
 
 	console.log('\n👀 Monitoring in progress... Press Ctrl+C to stop.\n')
 }
@@ -254,4 +352,7 @@ async function startMonitoring() {
 // ========================================
 // START THE SCRIPT
 // ========================================
-startMonitoring().catch(console.error)
+startMonitoring().catch((error) => {
+	console.error('❌ Fatal error:', error)
+	process.exit(1)
+})
